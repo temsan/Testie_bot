@@ -1,5 +1,6 @@
 .env
 niche_config.json
+avito_state.json
 __pycache__/
 *.pyc
 .venv/
