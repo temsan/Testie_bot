@@ -1,0 +1,23 @@
+# Конфиг деплоя avito_bot.py на Fly.io как фонового воркера (без HTTP-порта).
+# Перед первым деплоем: flyctl launch --no-deploy (или flyctl apps create),
+# заменить app на реальное уникальное имя, при необходимости — region.
+
+app = "avito-bot"  # заменить на своё уникальное имя приложения
+primary_region = "ams"  # ближайший к вам регион, см. `fly platform regions`
+
+[build]
+
+[[mounts]]
+  source = "avito_data"
+  destination = "/data"
+
+[env]
+  AVITO_STATE_DIR = "/data"
+  POLL_INTERVAL_SECONDS = "30"
+
+[processes]
+  app = "python avito_bot.py"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

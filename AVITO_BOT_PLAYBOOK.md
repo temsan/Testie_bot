@@ -116,6 +116,40 @@ PYTHONIOENCODING=utf-8 python -c "import json, storage; print(json.dumps(storage
 6. Сервис — фоновый воркер, HTTP-порт ему не нужен (Railway это
    поддерживает наравне с веб-сервисами).
 
+## Деплой на Fly.io (альтернатива Railway)
+
+Тот же принцип (см. режимы выше), в репозитории уже есть `fly.toml` рядом
+с `Dockerfile`. Деплой — с вашей машины через `flyctl` (в этой сессии
+доступа к fly.io нет — egress этой песочницы блокирует произвольные
+хосты, деплоить нужно локально).
+
+### Шаги
+
+1. Тот же шаг 1, что и для Railway: локально получить
+   `AVITO_STORAGE_STATE_B64` через `export_avito_session.py`.
+2. Установить `flyctl` (https://fly.io/docs/flyctl/install/), `fly auth login`.
+3. В `fly.toml` поменять `app = "avito-bot"` на своё уникальное имя
+   (и `primary_region`, если нужно другой).
+4. Создать приложение и volume (10-минутный полный размер free allowance
+   обычно хватает под `avito_state.json`):
+   ```
+   fly apps create <ваше-имя-приложения>
+   fly volumes create avito_data --region ams --size 1
+   ```
+5. Задать секреты (не коммитятся, хранятся в Fly, а не в репозитории):
+   ```
+   fly secrets set \
+     AVITO_STORAGE_STATE_B64="<значение из шага 1>" \
+     OPENROUTER_API_KEY="<ваш ключ>"
+   ```
+6. Деплой: `fly deploy`.
+7. Логи: `fly logs`. Когда сессия Avito истечёт (см. ниже) — повторить
+   шаг 1 и обновить секрет: `fly secrets set AVITO_STORAGE_STATE_B64="..."`.
+
+Сессия Avito рано или поздно истечёт (cookies разлогинят бота — в логах
+появятся ошибки загрузки страницы messenger) — тогда шаг 1 нужно повторить
+и обновить `AVITO_STORAGE_STATE_B64` на выбранном хостинге (Railway или Fly).
+
 ## Важно
 
 - Не отправлять сообщения в чаты, которые не являются лидами (например,
