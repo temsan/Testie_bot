@@ -1,2 +1,6 @@
 python-telegram-bot==21.6
 python-dotenv==1.0.1
+
+# Avito Messenger bot (avito_bot.py)
+playwright==1.56.1
+requests==2.32.3
