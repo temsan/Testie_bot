@@ -1,0 +1,24 @@
+# Конфиг ИНТЕРАКТИВНОГО варианта: постоянный Chrome с виртуальным рабочим
+# столом (Xvfb + x11vnc + noVNC) и avito_bot.py в одном контейнере.
+# Логин на avito.ru делается один раз через noVNC — см. AVITO_BOT_PLAYBOOK.md,
+# раздел «Деплой на Fly.io с интерактивным логином».
+#
+# ВАЖНО: порт noVNC (6080) НЕ публикуется наружу — здесь нет [[services]] /
+# [http_service]. Доступ только через `fly proxy 6080:6080 -a <app>`, то
+# есть только вам, через ваш собственный flyctl-логин. Не добавляйте
+# публичный сервис на этот порт — это живой залогиненный браузер продавца,
+# доступ к нему = полный контроль над перепиской и аккаунтом.
+
+app = "avito-bot-desktop"  # заменить на своё уникальное имя приложения
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile.desktop"
+
+[[mounts]]
+  source = "avito_desktop_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"
