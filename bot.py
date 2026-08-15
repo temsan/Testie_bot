@@ -5,11 +5,13 @@ Telegram-бот "консультант": ведёт диалог с потен�
 определяет целевой лид или нет, и либо предлагает следующий шаг
 (запрашивает контакт), либо вежливо закрывает диалог.
 
-Ниша и правила квалификации настраиваются в config.py без изменения кода.
+Ниша и правила квалификации настраиваются либо в config.py, либо (удобнее)
+через админ-панель бота: команда /admin -> мастер по шагам с кнопками.
+Изменения из мастера сохраняются в niche_config.json и применяются сразу.
 
 Запуск:
     1) pip install -r requirements.txt
-    2) создать .env на основе .env.example и указать BOT_TOKEN
+    2) создать .env на основе .env.example и указать BOT_TOKEN (и ADMIN_IDS)
     3) python bot.py
 """
 
@@ -27,7 +29,8 @@ from telegram.ext import (
     filters,
 )
 
-from config import NICHE, QUALIFICATION_RULES
+import storage
+from admin import build_admin_conversation
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -47,41 +50,45 @@ def _keyboard(options):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
-    await update.message.reply_text(NICHE["greeting"], reply_markup=ReplyKeyboardRemove())
+    cfg = storage.get_config()
+    context.user_data["cfg"] = cfg  # фиксируем конфиг на время диалога
+    await update.message.reply_text(cfg["greeting"], reply_markup=ReplyKeyboardRemove())
     return NEED
 
 
 async def need_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    cfg = context.user_data["cfg"]
     context.user_data["need"] = update.message.text
     await update.message.reply_text(
-        NICHE["budget_question"],
-        reply_markup=_keyboard(NICHE["budget_options"]),
+        cfg["budget_question"],
+        reply_markup=_keyboard(cfg["budget_options"]),
     )
     return BUDGET
 
 
 async def budget_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    answer = update.message.text
-    context.user_data["budget"] = answer
+    cfg = context.user_data["cfg"]
+    context.user_data["budget"] = update.message.text
     await update.message.reply_text(
-        NICHE["timeline_question"],
-        reply_markup=_keyboard(NICHE["timeline_options"]),
+        cfg["timeline_question"],
+        reply_markup=_keyboard(cfg["timeline_options"]),
     )
     return TIMELINE
 
 
-def _qualify(user_data: dict) -> bool:
-    budget_score = QUALIFICATION_RULES["budget_scores"].get(user_data.get("budget"), 0)
-    timeline_score = QUALIFICATION_RULES["timeline_scores"].get(user_data.get("timeline"), 0)
+def _qualify(cfg: dict, user_data: dict) -> bool:
+    budget_score = cfg["budget_scores"].get(user_data.get("budget"), 0)
+    timeline_score = cfg["timeline_scores"].get(user_data.get("timeline"), 0)
     total = budget_score + timeline_score
     user_data["score"] = total
-    return total >= QUALIFICATION_RULES["QUALIFY_THRESHOLD"]
+    return total >= cfg["QUALIFY_THRESHOLD"]
 
 
 async def timeline_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    cfg = context.user_data["cfg"]
     context.user_data["timeline"] = update.message.text
 
-    is_qualified = _qualify(context.user_data)
+    is_qualified = _qualify(cfg, context.user_data)
     context.user_data["qualified"] = is_qualified
 
     logger.info(
@@ -95,28 +102,30 @@ async def timeline_received(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if is_qualified:
         await update.message.reply_text(
-            NICHE["qualified_message"], reply_markup=ReplyKeyboardRemove()
+            cfg["qualified_message"], reply_markup=ReplyKeyboardRemove()
         )
         return CONTACT
 
     await update.message.reply_text(
-        NICHE["not_qualified_message"], reply_markup=ReplyKeyboardRemove()
+        cfg["not_qualified_message"], reply_markup=ReplyKeyboardRemove()
     )
-    await update.message.reply_text(NICHE["restart_hint"])
+    await update.message.reply_text(cfg["restart_hint"])
     return ConversationHandler.END
 
 
 async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    cfg = context.user_data["cfg"]
     context.user_data["contact"] = update.message.text
     logger.info("Контакт целевого лида получен: %r", context.user_data.get("contact"))
-    await update.message.reply_text(NICHE["thanks_after_contact"])
-    await update.message.reply_text(NICHE["restart_hint"])
+    await update.message.reply_text(cfg["thanks_after_contact"])
+    await update.message.reply_text(cfg["restart_hint"])
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    cfg = context.user_data.get("cfg") or storage.get_config()
     await update.message.reply_text(
-        "Диалог прерван. " + NICHE["restart_hint"], reply_markup=ReplyKeyboardRemove()
+        "Диалог прерван. " + cfg["restart_hint"], reply_markup=ReplyKeyboardRemove()
     )
     return ConversationHandler.END
 
@@ -143,8 +152,9 @@ def main() -> None:
     )
 
     application.add_handler(conv_handler)
+    application.add_handler(build_admin_conversation())
 
-    logger.info("Бот запущен (ниша: %s)", NICHE["name"])
+    logger.info("Бот запущен (ниша: %s)", storage.get_config()["name"])
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
