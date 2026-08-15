@@ -2,9 +2,14 @@
 """
 Автономный бот квалификации лидов через Avito Messenger.
 
-Подключается к уже открытому Chrome пользователя (запущенному с флагом
---remote-debugging-port=9222) через Playwright CDP, переиспользуя
-авторизованную сессию продавца на avito.ru — повторный логин не нужен.
+Два режима подключения к браузеру (см. get_browser_and_context):
+  1. CDP — подключение к уже открытому локальному Chrome пользователя
+     (--remote-debugging-port=9222). Удобно для локальной разработки/теста,
+     повторный логин не нужен.
+  2. storage_state — headless Chromium запускается с нуля и подгружает
+     заранее сохранённые cookies авторизованной сессии (см.
+     export_avito_session.py). Не требует открытого Chrome — подходит для
+     запуска на сервере/хостинге (Railway и т.п.).
 
 Алгоритм по стадиям (NEED -> BUDGET -> TIMELINE -> CONTACT -> DONE) описан в
 AVITO_BOT_PLAYBOOK.md. Скоринг считается детерминированно из
@@ -20,19 +25,24 @@ Avito. Перед первым реальным запуском откройт�
 https://www.avito.ru/profile/messenger и поправьте SELECTORS при
 необходимости.
 
-Запуск:
+Запуск (локально, режим CDP):
     1) Открыть Chrome с флагом --remote-debugging-port=9222, залогиниться
        на avito.ru как продавец, оставить открытой любую вкладку.
     2) pip install -r requirements.txt
-    3) .env: OPENROUTER_API_KEY (+ опционально OPENROUTER_MODEL, CDP_URL,
-       POLL_INTERVAL_SECONDS) — см. .env.example
+    3) .env: OPENROUTER_API_KEY, CDP_URL=http://localhost:9222 (+ опционально
+       OPENROUTER_MODEL, POLL_INTERVAL_SECONDS) — см. .env.example
     4) python avito_bot.py
+
+Запуск на хостинге (режим storage_state) — см. AVITO_BOT_PLAYBOOK.md,
+раздел «Деплой на Railway».
 """
 
+import base64
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -49,7 +59,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("avito_bot")
 
-STATE_PATH = Path(__file__).parent / "avito_state.json"
+STATE_DIR = Path(os.getenv("AVITO_STATE_DIR", str(Path(__file__).parent)))
+STATE_PATH = STATE_DIR / "avito_state.json"
 MESSENGER_URL = "https://www.avito.ru/profile/messenger"
 CHAT_URL_RE = re.compile(r"/profile/messenger/channel/([\w-]+)")
 
@@ -330,22 +341,56 @@ def tick(page: Page, state: dict) -> None:
     )
 
 
+def get_browser_and_context(p):
+    """Выбирает режим подключения к браузеру по переменным окружения.
+
+    Приоритет: сохранённая сессия (для хостинга) -> CDP (для локальной
+    разработки с уже открытым Chrome).
+    """
+    storage_state_b64 = os.getenv("AVITO_STORAGE_STATE_B64")
+    storage_state_path = os.getenv("AVITO_STORAGE_STATE_PATH")
+    cdp_url = os.getenv("CDP_URL")
+
+    if storage_state_b64:
+        raw = base64.b64decode(storage_state_b64)
+        tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".json", delete=False)
+        tmp.write(raw)
+        tmp.close()
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(storage_state=tmp.name)
+        logger.info("Запущен headless Chromium с сохранённой сессией (AVITO_STORAGE_STATE_B64)")
+        return browser, context
+
+    if storage_state_path:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(storage_state=storage_state_path)
+        logger.info("Запущен headless Chromium с сохранённой сессией (%s)", storage_state_path)
+        return browser, context
+
+    if cdp_url:
+        browser = p.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        logger.info("Подключено к Chrome по CDP (%s)", cdp_url)
+        return browser, context
+
+    raise RuntimeError(
+        "Не задан ни AVITO_STORAGE_STATE_B64/AVITO_STORAGE_STATE_PATH (запуск на "
+        "хостинге), ни CDP_URL (локальный запуск с открытым Chrome). "
+        "См. .env.example и AVITO_BOT_PLAYBOOK.md."
+    )
+
+
 def main() -> None:
     load_dotenv()
-    cdp_url = os.getenv("CDP_URL", "http://localhost:9222")
     poll_interval = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 
     state = load_state()
 
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url)
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        browser, context = get_browser_and_context(p)
         page = context.new_page()
 
-        logger.info(
-            "Подключено к Chrome по CDP (%s), старт мониторинга (интервал=%ss)",
-            cdp_url, poll_interval,
-        )
+        logger.info("Старт мониторинга Avito Messenger (интервал=%ss)", poll_interval)
         try:
             while True:
                 tick(page, state)

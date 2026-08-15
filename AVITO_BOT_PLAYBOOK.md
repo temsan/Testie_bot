@@ -76,6 +76,46 @@ PYTHONIOENCODING=utf-8 python -c "import json, storage; print(json.dumps(storage
   если лид написал что-то ещё, ответить `cfg["restart_hint"]`-подобным
   сообщением ("данные переданы менеджеру, скоро свяжемся") и не трогать состояние.
 
+## Деплой на Railway (постоянный процесс, без открытого Chrome)
+
+`avito_bot.py` поддерживает два режима подключения к браузеру
+(см. `get_browser_and_context` в коде):
+
+- **CDP** (`CDP_URL`) — для локальной разработки, требует открытого Chrome
+  с `--remote-debugging-port=9222`.
+- **storage_state** (`AVITO_STORAGE_STATE_B64` / `AVITO_STORAGE_STATE_PATH`)
+  — headless Chromium стартует с нуля и подгружает заранее сохранённые
+  cookies авторизованной сессии. Именно этот режим нужен для хостинга —
+  Railway не имеет доступа к вашему локальному Chrome.
+
+### Шаги
+
+1. **Локально** (у себя, не на хостинге): открыть Chrome с
+   `--remote-debugging-port=9222`, залогиниться на avito.ru как продавец,
+   выполнить `python export_avito_session.py`. Скрипт сохранит
+   `avito_storage_state.json` и напечатает его base64-представление —
+   именно оно, а не пароль, идёт дальше на хостинг.
+2. В Railway создать новый проект → Deploy from GitHub repo → выбрать этот
+   репозиторий (в нём уже есть `Dockerfile`, Railway подхватит его
+   автоматически).
+3. Задать переменные окружения проекта в Railway:
+   - `AVITO_STORAGE_STATE_B64` — значение из шага 1
+   - `OPENROUTER_API_KEY`
+   - `OPENROUTER_MODEL` (опционально, дефолт в коде —
+     `meta-llama/llama-3.1-8b-instruct:free`)
+   - `POLL_INTERVAL_SECONDS` (опционально, дефолт 30)
+   - `AVITO_STATE_DIR=/data` (если подключён volume, см. ниже)
+4. **Volume для `avito_state.json`** (рекомендуется): без него состояние
+   диалогов (стадии, накопленные ответы, дедупликация по
+   `last_seen_text`) будет теряться при каждом рестарте контейнера. В
+   Railway: Settings → Volumes → примонтировать на `/data`, задать
+   `AVITO_STATE_DIR=/data`.
+5. Сессия Avito рано или поздно истечёт (cookies разлогинят бота — в
+   логах появятся ошибки загрузки страницы messenger). Тогда шаг 1
+   нужно повторить и обновить `AVITO_STORAGE_STATE_B64` в Railway.
+6. Сервис — фоновый воркер, HTTP-порт ему не нужен (Railway это
+   поддерживает наравне с веб-сервисами).
+
 ## Важно
 
 - Не отправлять сообщения в чаты, которые не являются лидами (например,
