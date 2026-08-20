@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Telegram-бот "консультант": ведёт диалог с потенциальным клиентом,
-задаёт квалифицирующие вопросы (потребность, бюджет, сроки),
-определяет целевой лид или нет, и либо предлагает следующий шаг
-(запрашивает контакт), либо вежливо закрывает диалог.
+Telegram-бот "консультант": ведёт живой диалог с потенциальным клиентом
+через LLM (OpenRouter, бесплатная модель) — выясняет потребность, бюджет и
+сроки естественным языком, а не жёсткой анкетой с кнопками. Скоринг
+(целевой лид или нет) считается детерминированно в Python по config.py,
+LLM только ведёт беседу и сообщает, что удалось выяснить.
 
 Ниша и правила квалификации настраиваются либо в config.py, либо (удобнее)
 через админ-панель бота: команда /admin -> мастер по шагам с кнопками.
@@ -11,7 +12,8 @@ Telegram-бот "консультант": ведёт диалог с потен�
 
 Запуск:
     1) pip install -r requirements.txt
-    2) создать .env на основе .env.example и указать BOT_TOKEN (и ADMIN_IDS)
+    2) создать .env на основе .env.example и указать BOT_TOKEN, ADMIN_IDS,
+       OPENROUTER_API_KEY (бесплатный ключ — openrouter.ai/keys)
     3) python bot.py
 """
 
@@ -30,6 +32,7 @@ from telegram.ext import (
     filters,
 )
 
+import llm
 import storage
 from admin import build_admin_conversation
 
@@ -39,28 +42,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Состояния диалога
-NEED, BUDGET, TIMELINE, CONTACT = range(4)
+# Состояния диалога: CHATTING — LLM выясняет потребность/бюджет/сроки,
+# CONTACT — ждём контакт от уже квалифицированного лида (без LLM).
+CHATTING, CONTACT = range(2)
 
 START_BUTTON = "🚀 Оставить заявку"
-
-
-def _keyboard(options):
-    return ReplyKeyboardMarkup(
-        [[opt] for opt in options], one_time_keyboard=True, resize_keyboard=True
-    )
 
 
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[START_BUTTON]], resize_keyboard=True)
 
 
+def _build_system_prompt(cfg: dict) -> str:
+    budget_lines = "\n".join(f'- "{opt}"' for opt in cfg["budget_options"])
+    timeline_lines = "\n".join(f'- "{opt}"' for opt in cfg["timeline_options"])
+    return (
+        f'Ты — бот-консультант в нише «{cfg["name"]}». Веди с клиентом живой, '
+        "дружелюбный диалог в Telegram — не анкету по шаблону, не перечисляй "
+        "сразу все вопросы, задавай по одному за раз.\n\n"
+        "Иди по шагам:\n"
+        "1. Сначала выясни потребность клиента — что именно ему нужно. Если "
+        f'ответ слишком общий, уточни своими словами в духе: «{cfg["need_clarify_question"]}»\n'
+        "2. Когда потребность понятна, спроси про бюджет. Ответ клиента должен "
+        "быть сведён РОВНО к одному из вариантов ниже (дословно, ничего не "
+        f"выдумывай сверх списка):\n{budget_lines}\n"
+        "3. После бюджета спроси про сроки/срочность — тоже ровно один из "
+        f"вариантов:\n{timeline_lines}\n\n"
+        "Правила: только один вопрос за раз, не забегай вперёд; не выдумывай "
+        "ничего о продукте/услуге сверх того, что здесь написано; пиши "
+        "коротко и по-человечески, без канцелярита, можно с лёгкими эмодзи."
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     cfg = storage.get_config()
     context.user_data["cfg"] = cfg  # фиксируем конфиг на время диалога
+    context.user_data["messages"] = [
+        {"role": "system", "content": _build_system_prompt(cfg)},
+        {"role": "assistant", "content": cfg["greeting"]},
+    ]
     await update.message.reply_text(cfg["greeting"], reply_markup=ReplyKeyboardRemove())
-    return NEED
+    return CHATTING
 
 
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -68,26 +91,6 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Нажмите «{START_BUTTON}», чтобы начать 👇", reply_markup=_main_menu_keyboard()
     )
-
-
-async def need_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    cfg = context.user_data["cfg"]
-    context.user_data["need"] = update.message.text
-    await update.message.reply_text(
-        cfg["budget_question"],
-        reply_markup=_keyboard(cfg["budget_options"]),
-    )
-    return BUDGET
-
-
-async def budget_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    cfg = context.user_data["cfg"]
-    context.user_data["budget"] = storage.match_option(update.message.text, cfg["budget_options"])
-    await update.message.reply_text(
-        cfg["timeline_question"],
-        reply_markup=_keyboard(cfg["timeline_options"]),
-    )
-    return TIMELINE
 
 
 def _qualify(cfg: dict, user_data: dict) -> bool:
@@ -113,9 +116,37 @@ def _log_lead(update: Update, user_data: dict, contact: str | None = None) -> No
     storage.append_lead(lead)
 
 
-async def timeline_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def chatting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = context.user_data["cfg"]
-    context.user_data["timeline"] = storage.match_option(update.message.text, cfg["timeline_options"])
+    context.user_data["messages"].append({"role": "user", "content": update.message.text})
+
+    try:
+        reply_text = await llm.reply(context.user_data["messages"])
+    except Exception:
+        logger.exception("Ошибка обращения к LLM")
+        await update.message.reply_text(
+            "Извините, сейчас не получается ответить — попробуйте, пожалуйста, ещё раз."
+        )
+        return CHATTING
+
+    context.user_data["messages"].append({"role": "assistant", "content": reply_text})
+    await update.message.reply_text(reply_text)
+
+    try:
+        state = await llm.extract(context.user_data["messages"], cfg)
+    except Exception:
+        logger.exception("Ошибка извлечения данных из диалога")
+        state = {}
+
+    if state.get("need"):
+        context.user_data["need"] = state["need"]
+    if state.get("budget"):
+        context.user_data["budget"] = storage.match_option(state["budget"], cfg["budget_options"])
+    if state.get("timeline"):
+        context.user_data["timeline"] = storage.match_option(state["timeline"], cfg["timeline_options"])
+
+    if not (context.user_data.get("budget") and context.user_data.get("timeline")):
+        return CHATTING
 
     is_qualified = _qualify(cfg, context.user_data)
     context.user_data["qualified"] = is_qualified
@@ -179,9 +210,7 @@ def build_application(token: str) -> Application:
             MessageHandler(filters.Regex(f"^{START_BUTTON}$"), start),
         ],
         states={
-            NEED: [MessageHandler(filters.TEXT & ~filters.COMMAND, need_received)],
-            BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, budget_received)],
-            TIMELINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, timeline_received)],
+            CHATTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, chatting)],
             CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
