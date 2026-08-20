@@ -148,14 +148,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-def main() -> None:
-    load_dotenv()
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError(
-            "Не найден BOT_TOKEN. Создайте .env на основе .env.example и укажите токен."
-        )
+def build_application(token: str) -> Application:
+    """Собирает Application бота: сценарий диалога + админ-панель.
 
+    Общая точка входа и для polling/Render-webhook (main() ниже), и для
+    WSGI-обёртки на PythonAnywhere (wsgi_app.py), чтобы обработчики не дублировались.
+    """
     application = Application.builder().token(token).build()
 
     conv_handler = ConversationHandler(
@@ -171,6 +169,18 @@ def main() -> None:
 
     application.add_handler(conv_handler)
     application.add_handler(build_admin_conversation())
+    return application
+
+
+def main() -> None:
+    load_dotenv()
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "Не найден BOT_TOKEN. Создайте .env на основе .env.example и укажите токен."
+        )
+
+    application = build_application(token)
 
     logger.info("Бот запущен (ниша: %s)", storage.get_config()["name"])
 
