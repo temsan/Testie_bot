@@ -28,6 +28,7 @@ POST-запрос от Telegram синхронно обрабатывается 
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -58,13 +59,35 @@ telegram_app = build_application(TOKEN)
 # чтобы не пересоздавать Application и не терять context.user_data между сообщениями.
 _loop = asyncio.new_event_loop()
 asyncio.set_event_loop(_loop)
-_loop.run_until_complete(telegram_app.initialize())
+_initialized = False
+
+
+def _ensure_initialized() -> None:
+    """Инициализация (get_me через прокси PythonAnywhere) — лениво, при первом
+    запросе, а не при импорте модуля: если прокси free-тарифа временно
+    недоступен/отвечает 5xx, это не должно валить весь веб-апп на старте."""
+    global _initialized
+    if _initialized:
+        return
+    last_error = None
+    for attempt in range(5):
+        try:
+            _loop.run_until_complete(telegram_app.initialize())
+            _initialized = True
+            return
+        except Exception as exc:  # телеграм/httpx ошибки сети через прокси
+            last_error = exc
+            logger.warning("Не удалось инициализировать бота (попытка %s/5): %s", attempt + 1, exc)
+            time.sleep(2)
+    raise RuntimeError(f"Не удалось инициализировать бота после 5 попыток: {last_error}")
+
 
 flask_app = Flask(__name__)
 
 
 @flask_app.route(f"/{TOKEN}", methods=["POST"])
 def telegram_webhook():
+    _ensure_initialized()
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
     _loop.run_until_complete(telegram_app.process_update(update))
     return "ok"
