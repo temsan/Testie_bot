@@ -216,8 +216,13 @@ def build_application(token: str) -> Application:
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    # Админ-панель регистрируется в отдельной, более приоритетной группе (-1):
+    # иначе, пока у администратора идёт диалог квалификации лида (conv_handler
+    # ниже "держит" все его сообщения в своём текущем состоянии), команда
+    # /admin до неё просто не доходит и обновление тихо отбрасывается.
+    application.add_handler(build_admin_conversation(), group=-1)
+
     application.add_handler(conv_handler)
-    application.add_handler(build_admin_conversation())
     # Ловит сообщения вне диалога (первый заход без /start) — показывает кнопку запуска.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, welcome))
     return application
