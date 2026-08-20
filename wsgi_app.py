@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from flask import Flask, request
 from telegram import Update
 
-from bot import build_application
+from bot import build_application, setup_commands
 
 # uWSGI на PythonAnywhere запускает процесс не из папки репозитория, поэтому
 # load_dotenv() без аргумента не находит .env — указываем путь явно.
@@ -73,6 +73,7 @@ def _ensure_initialized() -> None:
     for attempt in range(5):
         try:
             _loop.run_until_complete(telegram_app.initialize())
+            _loop.run_until_complete(setup_commands(telegram_app))
             _initialized = True
             return
         except Exception as exc:  # телеграм/httpx ошибки сети через прокси

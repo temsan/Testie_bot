@@ -20,7 +20,7 @@ import os
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -42,11 +42,17 @@ logger = logging.getLogger(__name__)
 # Состояния диалога
 NEED, BUDGET, TIMELINE, CONTACT = range(4)
 
+START_BUTTON = "🚀 Оставить заявку"
+
 
 def _keyboard(options):
     return ReplyKeyboardMarkup(
         [[opt] for opt in options], one_time_keyboard=True, resize_keyboard=True
     )
+
+
+def _main_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([[START_BUTTON]], resize_keyboard=True)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -55,6 +61,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["cfg"] = cfg  # фиксируем конфиг на время диалога
     await update.message.reply_text(cfg["greeting"], reply_markup=ReplyKeyboardRemove())
     return NEED
+
+
+async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывается, если пользователь пишет боту, не начав диалог кнопкой/командой."""
+    await update.message.reply_text(
+        f"Нажмите «{START_BUTTON}», чтобы начать 👇", reply_markup=_main_menu_keyboard()
+    )
 
 
 async def need_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -124,9 +137,8 @@ async def timeline_received(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     _log_lead(update, context.user_data)
     await update.message.reply_text(
-        cfg["not_qualified_message"], reply_markup=ReplyKeyboardRemove()
+        cfg["not_qualified_message"], reply_markup=_main_menu_keyboard()
     )
-    await update.message.reply_text(cfg["restart_hint"])
     return ConversationHandler.END
 
 
@@ -135,17 +147,22 @@ async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["contact"] = update.message.text
     logger.info("Контакт целевого лида получен: %r", context.user_data.get("contact"))
     _log_lead(update, context.user_data, contact=context.user_data["contact"])
-    await update.message.reply_text(cfg["thanks_after_contact"])
-    await update.message.reply_text(cfg["restart_hint"])
+    await update.message.reply_text(cfg["thanks_after_contact"], reply_markup=_main_menu_keyboard())
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    cfg = context.user_data.get("cfg") or storage.get_config()
-    await update.message.reply_text(
-        "Диалог прерван. " + cfg["restart_hint"], reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text("Диалог прерван.", reply_markup=_main_menu_keyboard())
     return ConversationHandler.END
+
+
+async def setup_commands(application: Application) -> None:
+    """Меню команд (кнопка «/» в Telegram) — красивые подписи вместо голых команд."""
+    await application.bot.set_my_commands([
+        BotCommand("start", "🚀 Оставить заявку"),
+        BotCommand("cancel", "❌ Прервать диалог"),
+        BotCommand("admin", "⚙️ Панель администратора"),
+    ])
 
 
 def build_application(token: str) -> Application:
@@ -154,10 +171,13 @@ def build_application(token: str) -> Application:
     Общая точка входа и для polling/Render-webhook (main() ниже), и для
     WSGI-обёртки на PythonAnywhere (wsgi_app.py), чтобы обработчики не дублировались.
     """
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).post_init(setup_commands).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.Regex(f"^{START_BUTTON}$"), start),
+        ],
         states={
             NEED: [MessageHandler(filters.TEXT & ~filters.COMMAND, need_received)],
             BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, budget_received)],
@@ -169,6 +189,8 @@ def build_application(token: str) -> Application:
 
     application.add_handler(conv_handler)
     application.add_handler(build_admin_conversation())
+    # Ловит сообщения вне диалога (первый заход без /start) — показывает кнопку запуска.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, welcome))
     return application
 
 
