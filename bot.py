@@ -173,7 +173,23 @@ def main() -> None:
     application.add_handler(build_admin_conversation())
 
     logger.info("Бот запущен (ниша: %s)", storage.get_config()["name"])
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # На Render (и подобных PaaS) публичный URL сервиса и порт приходят через
+    # переменные окружения — если они заданы, работаем через webhook, иначе
+    # (локальная разработка) — обычный polling.
+    external_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
+    if external_url:
+        port = int(os.getenv("PORT", "10000"))
+        webhook_path = token  # секретный путь = токен, чтобы левые запросы не долетали до бота
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=webhook_path,
+            webhook_url=f"{external_url.rstrip('/')}/{webhook_path}",
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

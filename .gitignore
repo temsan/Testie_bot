@@ -2,6 +2,7 @@
 niche_config.json
 avito_state.json
 leads.json
+bot.log
 __pycache__/
 *.pyc
 .venv/
