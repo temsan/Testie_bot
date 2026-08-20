@@ -17,6 +17,7 @@ Telegram-бот "консультант": ведёт диалог с потен�
 
 import logging
 import os
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
@@ -68,7 +69,7 @@ async def need_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def budget_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = context.user_data["cfg"]
-    context.user_data["budget"] = update.message.text
+    context.user_data["budget"] = storage.match_option(update.message.text, cfg["budget_options"])
     await update.message.reply_text(
         cfg["timeline_question"],
         reply_markup=_keyboard(cfg["timeline_options"]),
@@ -84,9 +85,24 @@ def _qualify(cfg: dict, user_data: dict) -> bool:
     return total >= cfg["QUALIFY_THRESHOLD"]
 
 
+def _log_lead(update: Update, user_data: dict, contact: str | None = None) -> None:
+    lead = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user_id": update.effective_user.id,
+        "username": update.effective_user.username,
+        "need": user_data.get("need"),
+        "budget": user_data.get("budget"),
+        "timeline": user_data.get("timeline"),
+        "score": user_data.get("score"),
+        "qualified": user_data.get("qualified"),
+        "contact": contact,
+    }
+    storage.append_lead(lead)
+
+
 async def timeline_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = context.user_data["cfg"]
-    context.user_data["timeline"] = update.message.text
+    context.user_data["timeline"] = storage.match_option(update.message.text, cfg["timeline_options"])
 
     is_qualified = _qualify(cfg, context.user_data)
     context.user_data["qualified"] = is_qualified
@@ -106,6 +122,7 @@ async def timeline_received(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return CONTACT
 
+    _log_lead(update, context.user_data)
     await update.message.reply_text(
         cfg["not_qualified_message"], reply_markup=ReplyKeyboardRemove()
     )
@@ -117,6 +134,7 @@ async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     cfg = context.user_data["cfg"]
     context.user_data["contact"] = update.message.text
     logger.info("Контакт целевого лида получен: %r", context.user_data.get("contact"))
+    _log_lead(update, context.user_data, contact=context.user_data["contact"])
     await update.message.reply_text(cfg["thanks_after_contact"])
     await update.message.reply_text(cfg["restart_hint"])
     return ConversationHandler.END

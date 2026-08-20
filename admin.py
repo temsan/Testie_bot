@@ -27,7 +27,14 @@ from telegram.ext import (
 import storage
 
 # Состояния диалога админ-мастера
-MENU, STEP_TEXT, STEP_LIST, STEP_WEIGHT, STEP_NUMBER, CONFIRM = range(6)
+MENU, STEP_TEXT, STEP_LIST, STEP_WEIGHT, STEP_NUMBER, CONFIRM, EDIT_PICK, EDIT_VALUE = range(8)
+
+# Поля, доступные для точечного редактирования (подмножество WIZARD_STEPS без списков/весов —
+# их проще менять только целиком через мастер)
+EDITABLE_FIELDS = [
+    "name", "greeting", "budget_question", "timeline_question",
+    "QUALIFY_THRESHOLD", "qualified_message", "not_qualified_message", "thanks_after_contact",
+]
 
 # Описание шагов мастера — порядок важен
 WIZARD_STEPS = [
@@ -81,10 +88,16 @@ def _progress(idx: int) -> str:
 def _menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧙 Настроить нишу (мастер)", callback_data="wizard_start")],
+        [InlineKeyboardButton("✏️ Изменить поле", callback_data="edit_field")],
         [InlineKeyboardButton("👀 Текущий конфиг", callback_data="view_config")],
+        [InlineKeyboardButton("📋 Последние лиды", callback_data="view_leads")],
         [InlineKeyboardButton("🔄 Сбросить на дефолт", callback_data="reset_config")],
         [InlineKeyboardButton("❌ Закрыть", callback_data="close")],
     ])
+
+
+def _step_by_key(key: str) -> dict:
+    return next(s for s in WIZARD_STEPS if s["key"] == key)
 
 
 async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -119,9 +132,38 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await query.edit_message_text("✅ Конфиг сброшен на значения по умолчанию.", reply_markup=_menu_keyboard())
         return MENU
 
+    if query.data == "view_leads":
+        leads = storage.get_leads(limit=10)
+        if not leads:
+            text = "📋 Пока нет ни одного зафиксированного лида."
+        else:
+            lines = ["📋 *Последние лиды:*\n"]
+            for lead in leads:
+                mark = "✅" if lead.get("qualified") else "❌"
+                lines.append(
+                    f"{mark} {lead.get('timestamp', '')[:16]} @{lead.get('username') or lead.get('user_id')}\n"
+                    f"   need: {lead.get('need')}\n"
+                    f"   бюджет: {lead.get('budget')} | сроки: {lead.get('timeline')} | score: {lead.get('score')}\n"
+                    f"   контакт: {lead.get('contact') or '—'}"
+                )
+            text = "\n\n".join(lines)
+        await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=_menu_keyboard())
+        return MENU
+
     if query.data == "wizard_start":
         context.user_data["wizard"] = {"step": 0, "draft": {}}
         return await _send_step(update, context)
+
+    if query.data == "edit_field":
+        rows = [
+            [InlineKeyboardButton(_step_by_key(key)["title"], callback_data=f"editkey_{key}")]
+            for key in EDITABLE_FIELDS
+        ]
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
+        await query.edit_message_text(
+            "✏️ *Какое поле изменить?*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows)
+        )
+        return EDIT_PICK
 
     return MENU
 
@@ -287,6 +329,60 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return CONFIRM
 
 
+async def edit_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "back_to_menu":
+        await query.edit_message_text("⚙️ *Админ-панель бота*\n\nВыберите действие:",
+                                       parse_mode="Markdown", reply_markup=_menu_keyboard())
+        return MENU
+
+    key = query.data.removeprefix("editkey_")
+    step = _step_by_key(key)
+    context.user_data["edit_key"] = key
+    current = storage.get_config().get(key)
+
+    if step["type"] == "number":
+        kb = _number_keyboard(step.get("min", 0), step.get("max", 6))
+        await query.edit_message_text(
+            f"✏️ *{step['title']}*\n\nТекущее значение: {current}\n\n{step['prompt']}",
+            parse_mode="Markdown", reply_markup=kb,
+        )
+        return EDIT_VALUE
+
+    await query.edit_message_text(
+        f"✏️ *{step['title']}*\n\nТекущее значение:\n«{current}»\n\nВведите новое значение:",
+        parse_mode="Markdown",
+    )
+    return EDIT_VALUE
+
+
+async def edit_value_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    key = context.user_data["edit_key"]
+    cfg = storage.get_config()
+    cfg[key] = update.message.text.strip()
+    storage.save_config(cfg)
+    await update.message.reply_text(
+        f"💾 Сохранено! «{_step_by_key(key)['title']}» обновлено.", reply_markup=_menu_keyboard()
+    )
+    return MENU
+
+
+async def edit_value_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    key = context.user_data["edit_key"]
+    value = int(query.data.split("_")[1])
+    cfg = storage.get_config()
+    cfg[key] = value
+    storage.save_config(cfg)
+    await query.edit_message_text(
+        f"💾 Сохранено! «{_step_by_key(key)['title']}» обновлено на {value}.", reply_markup=_menu_keyboard()
+    )
+    return MENU
+
+
 async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Отменено.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
@@ -305,6 +401,11 @@ def build_admin_conversation() -> ConversationHandler:
             STEP_WEIGHT: [CallbackQueryHandler(on_number, pattern="^num_")],
             STEP_NUMBER: [CallbackQueryHandler(on_number, pattern="^num_")],
             CONFIRM: [CallbackQueryHandler(on_confirm)],
+            EDIT_PICK: [CallbackQueryHandler(edit_pick)],
+            EDIT_VALUE: [
+                CallbackQueryHandler(edit_value_number, pattern="^num_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value_text),
+            ],
         },
         fallbacks=[CommandHandler("cancel", admin_cancel)],
     )
