@@ -28,6 +28,7 @@ POST-запрос от Telegram синхронно обрабатывается 
 import asyncio
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -57,8 +58,13 @@ telegram_app = build_application(TOKEN)
 
 # Один общий event loop на весь процесс — переиспользуется между запросами,
 # чтобы не пересоздавать Application и не терять context.user_data между сообщениями.
+# uWSGI на PythonAnywhere может обрабатывать запросы в нескольких потоках —
+# run_until_complete() на одном loop из двух потоков одновременно недопустим
+# (второй вызов тихо ловит RuntimeError и роняет запрос без ответа клиенту),
+# поэтому все обращения к loop сериализуются через _loop_lock.
 _loop = asyncio.new_event_loop()
 asyncio.set_event_loop(_loop)
+_loop_lock = threading.Lock()
 _initialized = False
 
 
@@ -72,8 +78,9 @@ def _ensure_initialized() -> None:
     last_error = None
     for attempt in range(5):
         try:
-            _loop.run_until_complete(telegram_app.initialize())
-            _loop.run_until_complete(setup_commands(telegram_app))
+            with _loop_lock:
+                _loop.run_until_complete(telegram_app.initialize())
+                _loop.run_until_complete(setup_commands(telegram_app))
             _initialized = True
             return
         except Exception as exc:  # телеграм/httpx ошибки сети через прокси
@@ -90,7 +97,8 @@ flask_app = Flask(__name__)
 def telegram_webhook():
     _ensure_initialized()
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    _loop.run_until_complete(telegram_app.process_update(update))
+    with _loop_lock:
+        _loop.run_until_complete(telegram_app.process_update(update))
     return "ok"
 
 
