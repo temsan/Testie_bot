@@ -28,6 +28,7 @@ POST-запрос от Telegram синхронно обрабатывается 
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, request
@@ -35,7 +36,9 @@ from telegram import Update
 
 from bot import build_application
 
-load_dotenv()
+# uWSGI на PythonAnywhere запускает процесс не из папки репозитория, поэтому
+# load_dotenv() без аргумента не находит .env — указываем путь явно.
+load_dotenv(Path(__file__).parent / ".env")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
