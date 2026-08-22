@@ -6,8 +6,9 @@ PythonAnywhere free-тариф даёт один постоянно работа
 через uWSGI) — но не позволяет запускать собственный процесс с event loop,
 как это делает bot.py (application.run_webhook / run_polling). Поэтому
 здесь Application из python-telegram-bot собирается один раз при импорте
-модуля, инициализируется на общем asyncio event loop, а каждый входящий
-POST-запрос от Telegram синхронно обрабатывается на этом же loop.
+модуля; отдельный фоновый поток крутит единственный asyncio event loop
+(run_forever), а каждый входящий POST-запрос от Telegram передаёт туда
+корутину через run_coroutine_threadsafe() и ждёт результат.
 
 Как подключить на PythonAnywhere:
     1) Web -> Add a new web app -> Manual configuration -> Python 3.x.
@@ -56,15 +57,21 @@ if not TOKEN:
 
 telegram_app = build_application(TOKEN)
 
-# Один общий event loop на весь процесс — переиспользуется между запросами,
-# чтобы не пересоздавать Application и не терять context.user_data между сообщениями.
-# uWSGI на PythonAnywhere может обрабатывать запросы в нескольких потоках —
-# run_until_complete() на одном loop из двух потоков одновременно недопустим
-# (второй вызов тихо ловит RuntimeError и роняет запрос без ответа клиенту),
-# поэтому все обращения к loop сериализуются через _loop_lock.
+# uWSGI на PythonAnywhere обрабатывает запросы в нескольких потоках. Прошлый
+# вариант (один общий loop + run_until_complete() из любого потока под
+# блокировкой) всё равно иногда терял запросы: часть кликов по инлайн-кнопкам
+# в /admin пропадала без следа и без ошибки в логе. Правильный паттерн —
+# один выделенный поток с постоянно работающим loop (run_forever); все
+# остальные потоки только отправляют туда корутины через
+# run_coroutine_threadsafe() и ждут результат — без гонок за сам loop.
 _loop = asyncio.new_event_loop()
-asyncio.set_event_loop(_loop)
-_loop_lock = threading.Lock()
+threading.Thread(target=_loop.run_forever, daemon=True, name="ptb-loop").start()
+
+
+def _run(coro, timeout: float = 60):
+    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=timeout)
+
+
 _initialized = False
 
 
@@ -78,9 +85,8 @@ def _ensure_initialized() -> None:
     last_error = None
     for attempt in range(5):
         try:
-            with _loop_lock:
-                _loop.run_until_complete(telegram_app.initialize())
-                _loop.run_until_complete(setup_commands(telegram_app))
+            _run(telegram_app.initialize())
+            _run(setup_commands(telegram_app))
             _initialized = True
             return
         except Exception as exc:  # телеграм/httpx ошибки сети через прокси
@@ -97,8 +103,7 @@ flask_app = Flask(__name__)
 def telegram_webhook():
     _ensure_initialized()
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    with _loop_lock:
-        _loop.run_until_complete(telegram_app.process_update(update))
+    _run(telegram_app.process_update(update))
     return "ok"
 
 
