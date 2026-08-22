@@ -73,37 +73,89 @@ def _run(coro, timeout: float = 60):
 
 
 _initialized = False
+_init_lock = threading.Lock()
 
 
 def _ensure_initialized() -> None:
     """Инициализация (get_me через прокси PythonAnywhere) — лениво, при первом
     запросе, а не при импорте модуля: если прокси free-тарифа временно
-    недоступен/отвечает 5xx, это не должно валить весь веб-апп на старте."""
+    недоступен/отвечает 5xx, это не должно валить весь веб-апп на старте.
+    Под блокировкой — иначе несколько первых одновременных запросов успевают
+    пройти проверку `if _initialized` до того, как флаг выставится, и каждый
+    заново дёргает getMe/setMyCommands."""
     global _initialized
     if _initialized:
         return
-    last_error = None
-    for attempt in range(5):
-        try:
-            _run(telegram_app.initialize())
-            _run(setup_commands(telegram_app))
-            _initialized = True
+    with _init_lock:
+        if _initialized:
             return
-        except Exception as exc:  # телеграм/httpx ошибки сети через прокси
-            last_error = exc
-            logger.warning("Не удалось инициализировать бота (попытка %s/5): %s", attempt + 1, exc)
+        last_error = None
+        for attempt in range(5):
+            try:
+                _run(telegram_app.initialize())
+                _run(setup_commands(telegram_app))
+                _initialized = True
+                return
+            except Exception as exc:  # телеграм/httpx ошибки сети через прокси
+                last_error = exc
+                logger.warning("Не удалось инициализировать бота (попытка %s/5): %s", attempt + 1, exc)
             time.sleep(2)
     raise RuntimeError(f"Не удалось инициализировать бота после 5 попыток: {last_error}")
 
 
 flask_app = Flask(__name__)
 
+# Каждое обновление обрабатывается на одном loop серьёзно последовательно —
+# если пользователь быстро жмёт кнопки/шлёт сообщения подряд, а предыдущее
+# ещё в обработке (LLM-вызов — несколько секунд), новые запросы не встают
+# молча в очередь (иначе при частых нажатиях суммарная задержка растёт и
+# бот выглядит зависшим), а сразу получают лёгкий ответ "секунду".
+_inflight_lock = threading.Lock()
+_inflight_chats = set()
+
+
+def _extract_chat_id(payload: dict):
+    msg = payload.get("message") or payload.get("edited_message")
+    if msg:
+        return msg.get("chat", {}).get("id")
+    cq = payload.get("callback_query")
+    if cq:
+        return cq.get("message", {}).get("chat", {}).get("id")
+    return None
+
 
 @flask_app.route(f"/{TOKEN}", methods=["POST"])
 def telegram_webhook():
     _ensure_initialized()
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    _run(telegram_app.process_update(update))
+    payload = request.get_json(force=True)
+    chat_id = _extract_chat_id(payload)
+
+    if chat_id is not None:
+        with _inflight_lock:
+            busy = chat_id in _inflight_chats
+            if not busy:
+                _inflight_chats.add(chat_id)
+        if busy:
+            try:
+                if payload.get("callback_query"):
+                    _run(telegram_app.bot.answer_callback_query(
+                        payload["callback_query"]["id"], text="Секунду, обрабатываю предыдущее…"
+                    ))
+                else:
+                    _run(telegram_app.bot.send_message(
+                        chat_id, "⏳ Секунду, отвечаю на предыдущее сообщение…"
+                    ))
+            except Exception:
+                logger.exception("Не удалось отправить уведомление о занятости")
+            return "ok"
+
+    try:
+        update = Update.de_json(payload, telegram_app.bot)
+        _run(telegram_app.process_update(update))
+    finally:
+        if chat_id is not None:
+            with _inflight_lock:
+                _inflight_chats.discard(chat_id)
     return "ok"
 
 
