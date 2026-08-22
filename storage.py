@@ -64,6 +64,19 @@ def match_option(text: str, options: list) -> str:
     return close[0] if close else text
 
 
+def exact_match(text: str, options: list) -> str | None:
+    """Строгая версия match_option — для случаев, когда важно не спутать
+    свободный текст с ответом на вопрос (например, чтобы решить, можно ли
+    пропустить обращение к LLM). Возвращает вариант только при точном
+    совпадении или при опечатке/лишней пунктуации; None — если не уверены."""
+    text = text.strip()
+    for opt in options:
+        if opt.strip().lower() == text.lower():
+            return opt
+    close = difflib.get_close_matches(text, options, n=1, cutoff=0.85)
+    return close[0] if close else None
+
+
 def append_lead(lead: dict) -> None:
     leads = []
     if LEADS_PATH.exists():

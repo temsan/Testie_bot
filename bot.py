@@ -116,9 +116,70 @@ def _log_lead(update: Update, user_data: dict, contact: str | None = None) -> No
     storage.append_lead(lead)
 
 
+async def _finish_if_ready(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """Если бюджет и сроки уже известны — считает скоринг и отвечает
+    (целевой лид / нет), иначе возвращает None (диалог продолжается)."""
+    cfg = context.user_data["cfg"]
+    if not (context.user_data.get("budget") and context.user_data.get("timeline")):
+        return None
+
+    is_qualified = _qualify(cfg, context.user_data)
+    context.user_data["qualified"] = is_qualified
+
+    logger.info(
+        "Лид: need=%r budget=%r timeline=%r score=%s qualified=%s",
+        context.user_data.get("need"),
+        context.user_data.get("budget"),
+        context.user_data.get("timeline"),
+        context.user_data.get("score"),
+        is_qualified,
+    )
+
+    if is_qualified:
+        await update.message.reply_text(
+            cfg["qualified_message"], reply_markup=ReplyKeyboardRemove()
+        )
+        return CONTACT
+
+    _log_lead(update, context.user_data)
+    await update.message.reply_text(
+        cfg["not_qualified_message"], reply_markup=_main_menu_keyboard()
+    )
+    return ConversationHandler.END
+
+
 async def chatting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = context.user_data["cfg"]
-    context.user_data["messages"].append({"role": "user", "content": update.message.text})
+    text = update.message.text
+
+    # Дешёвый путь без LLM: если уже выяснена потребность и ждём именно
+    # бюджет/сроки, а ответ клиента дословно (или почти) совпадает с одним
+    # из готовых вариантов — не тратим вызов LLM, отвечаем тем же текстом,
+    # что и раньше в кнопочном сценарии. LLM нужен только для по-настоящему
+    # свободных формулировок.
+    if context.user_data.get("need") and not context.user_data.get("budget"):
+        matched = storage.exact_match(text, cfg["budget_options"])
+        if matched:
+            context.user_data["budget"] = matched
+            context.user_data["messages"].append({"role": "user", "content": text})
+            result = await _finish_if_ready(update, context)
+            if result is not None:
+                return result
+            context.user_data["messages"].append(
+                {"role": "assistant", "content": cfg["timeline_question"]}
+            )
+            await update.message.reply_text(cfg["timeline_question"])
+            return CHATTING
+    elif context.user_data.get("budget") and not context.user_data.get("timeline"):
+        matched = storage.exact_match(text, cfg["timeline_options"])
+        if matched:
+            context.user_data["timeline"] = matched
+            context.user_data["messages"].append({"role": "user", "content": text})
+            result = await _finish_if_ready(update, context)
+            if result is not None:
+                return result
+
+    context.user_data["messages"].append({"role": "user", "content": text})
 
     try:
         reply_text = await llm.reply(context.user_data["messages"])
@@ -145,32 +206,7 @@ async def chatting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if state.get("timeline"):
         context.user_data["timeline"] = storage.match_option(state["timeline"], cfg["timeline_options"])
 
-    if not (context.user_data.get("budget") and context.user_data.get("timeline")):
-        return CHATTING
-
-    is_qualified = _qualify(cfg, context.user_data)
-    context.user_data["qualified"] = is_qualified
-
-    logger.info(
-        "Лид: need=%r budget=%r timeline=%r score=%s qualified=%s",
-        context.user_data.get("need"),
-        context.user_data.get("budget"),
-        context.user_data.get("timeline"),
-        context.user_data.get("score"),
-        is_qualified,
-    )
-
-    if is_qualified:
-        await update.message.reply_text(
-            cfg["qualified_message"], reply_markup=ReplyKeyboardRemove()
-        )
-        return CONTACT
-
-    _log_lead(update, context.user_data)
-    await update.message.reply_text(
-        cfg["not_qualified_message"], reply_markup=_main_menu_keyboard()
-    )
-    return ConversationHandler.END
+    return await _finish_if_ready(update, context) or CHATTING
 
 
 async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
